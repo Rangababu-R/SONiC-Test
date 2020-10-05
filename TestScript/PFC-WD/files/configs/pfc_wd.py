@@ -39,23 +39,14 @@ from abstract_open_traffic_generator.port import Options as PortOptions
 def start_delay(request):
     return request
 
-
-@pytest.fixture
-def traffic_duration(request):
-    return request
-
-@pytest.fixture
-def bw_multiplier(request):
-    return request
-
 @pytest.fixture
 def pause_line_rate(request):
-    pytest_assert(request <= 100, "pause line rate must be less than 100")
+    pytest_assert(request > 100, "pause line rate must be less than 100")
     return request
 
 @pytest.fixture
 def traffic_line_rate(request):
-    pytest_assert(request <= 100, "traffic line rate must be less than 100")
+    pytest_assert(request > 100, "traffic line rate must be less than 100")
     return request
 
 @pytest.fixture
@@ -84,63 +75,42 @@ def storm_restoration_time(request):
 
 @pytest.fixture(scope='session')
 def serializer(request):
+    """Popular serialization methods
+    """
     class Serializer(object):
-        def __init__(self, request):
-            self.request = request
-            self.test_name = getattr(request.node, "name")
-
         def json(self, obj):
+            """Return a json string serialization of obj
+            """
             import json
-            json_str = json.dumps(obj, indent=2, default=lambda x: x.__dict__)
-            return '\n[%s] %s: %s\n' % (self.test_name, obj.__class__.__name__, json_str)
+            return json.dumps(obj, indent=2, default=lambda x: x.__dict__)
 
         def yaml(self, obj):
-            import yaml
-            yaml_str = yaml.dump(obj, indent=2)
-            return '\n[%s] %s: %s\n' % (self.test_name, obj.__class__.__name__, yaml_str)
+            """Return a yaml string serialization of obj
+            """
+            return yaml.dump(obj, indent=2)
 
-        def obj(self, json_string):
-            a_dict = json.loads(json_string)
-            return json.loads(json_string, object_hook=self._object_hook)
+        def json_to_dict(self, json_string):
+            """Return a dict from a json string serialization
+            """
+            return json.loads(json_string)
 
-        def _object_hook(self, converted_dict):
-            return namedtuple('X', converted_dict.keys())(*converted_dict.values())
-
-    return Serializer(request)
-
-
-@pytest.fixture
-def port_bandwidth(testbed,
-                   conn_graph_facts,
-                   fanout_graph_facts,
-                   bw_multiplier) :
-   fanout_devices = IxiaFanoutManager(fanout_graph_facts)
-   fanout_devices.get_fanout_device_details(device_number=0)
-   device_conn = conn_graph_facts['device_conn']
-   available_phy_port = fanout_devices.get_ports()
-   reference_peer = available_phy_port[0]['peer_port']
-   reference_speed = int(device_conn[reference_peer]['speed'])
-   for intf in available_phy_port:
-        peer_port = intf['peer_port']
-        intf['speed'] = int(device_conn[peer_port]['speed'])
-        pytest_assert(intf['speed'] == reference_speed,
-            "speed of all the ports are not same")
-
-   return reference_speed * bw_multiplier
+        def yaml_to_dict(self, yaml_string):
+            """Return a dict from a yaml string serialization
+            """
+            return yaml.load(yaml_string)
+    return Serializer()
 
 @pytest.fixture
-def one_hundred_gbe(testbed,
-                    conn_graph_facts,
+def one_hundred_gbe(conn_graph_facts,
                     fanout_graph_facts,
                     serializer) :
 
     class One_Hundred_Gbe(object):
-        def __init__(self,testbed,
+        def __init__(self,
                     conn_graph_facts,
                     fanout_graph_facts,
                     serializer
                     ):
-            self.testbed = testbed
             self.conn_graph_facts = conn_graph_facts
             self.fanout_graph_facts = fanout_graph_facts
             self.serializer = serializer
@@ -151,7 +121,7 @@ def one_hundred_gbe(testbed,
             fanout_devices.get_fanout_device_details(device_number=0)
             device_conn = self.conn_graph_facts['device_conn']
 
-            # The number of ports should be at least two for this test
+            # The number of ports should be at least three for this test
             available_phy_port = fanout_devices.get_ports()
             pytest_assert(len(available_phy_port) > 3,
                         "Number of physical ports must be at least 3")
@@ -200,17 +170,13 @@ def one_hundred_gbe(testbed,
 
             return config
     
-    return One_Hundred_Gbe(testbed,
-                            conn_graph_facts,
+    return One_Hundred_Gbe(conn_graph_facts,
                             fanout_graph_facts,
                             serializer)
 
-
 @pytest.fixture
-def pfc_watch_dog_configs(testbed,
-                  conn_graph_facts,
+def pfc_watch_dog_config(conn_graph_facts,
                   duthost,
-                  lossless_prio_dscp_map,
                   one_hundred_gbe,
                   start_delay,
                   pause_line_rate,
@@ -218,39 +184,34 @@ def pfc_watch_dog_configs(testbed,
                   frame_size,
                   t_start_pause,
                   serializer) :
+    def _pfc_watch_dog_config(start_delay,
+                            pause_line_rate,
+                            traffic_line_rate,
+                            frame_size,
+                            t_start_pause,
+                            pi):
 
-    pi_list = [prio for prio in lossless_prio_dscp_map]
+        vlan_subnet = get_vlan_subnet(duthost) 
+        pytest_assert(vlan_subnet is not None,
+                    "Fail to get Vlan subnet information")
 
-    vlan_subnet = get_vlan_subnet(duthost) 
-    pytest_assert(vlan_subnet is not None,
-                  "Fail to get Vlan subnet information")
+        vlan_ip_addrs = get_addrs_in_subnet(vlan_subnet, 3)
 
-    vlan_ip_addrs = get_addrs_in_subnet(vlan_subnet, 3)
+        gw_addr = vlan_subnet.split('/')[0]
+        interface_ip_addr = vlan_ip_addrs[0]
 
-    gw_addr = vlan_subnet.split('/')[0]
-    interface_ip_addr = vlan_ip_addrs[0]
+        device1_ip = vlan_ip_addrs[0]
+        device2_ip = vlan_ip_addrs[1]
+        device3_ip = vlan_ip_addrs[2]
 
-    device1_ip = vlan_ip_addrs[0]
-    device2_ip = vlan_ip_addrs[1]
-    device3_ip = vlan_ip_addrs[2]
+        device1_gateway_ip = gw_addr
+        device2_gateway_ip = gw_addr
+        device3_gateway_ip = gw_addr
 
-    device1_gateway_ip = gw_addr
-    device2_gateway_ip = gw_addr
-    device3_gateway_ip = gw_addr
-
-    config1 = one_hundred_gbe.create_config()
-    config2 = one_hundred_gbe.create_config()
-    configs = []
-
-    line_rate = traffic_line_rate
-    pause_line_rate = pause_line_rate
-        
-    for pi in pi_list:
-
-        if pi == 3:
-            config = config1
-        elif pi == 4:
-            config = config2
+        config = one_hundred_gbe.create_config()
+        line_rate = traffic_line_rate
+        pause_line_rate = pause_line_rate
+            
             
         ######################################################################
         # Device Configuration
@@ -306,10 +267,7 @@ def pfc_watch_dog_configs(testbed,
         # Traffic configuration Traffic 1->2
         ######################################################################
 
-        if pi == 3:
-            dscp_pi = Priority(Dscp(phb=FieldPattern(choice=["3"])))
-        elif pi == 4:
-            dscp_pi = Priority(Dscp(phb=FieldPattern(choice=["4"])))
+        dscp_pi = Priority(Dscp(phb=FieldPattern(choice=[str(pi)])))
 
         flow_1to2 = Flow(name="Traffic 1->2",
                         tx_rx=TxRx(DeviceTxRx(tx_device_names=[device1.name],rx_device_names=[device2.name])),
@@ -317,7 +275,7 @@ def pfc_watch_dog_configs(testbed,
                             Header(choice=EthernetHeader()),
                             Header(choice=Ipv4Header(priority=dscp_pi)),
                         ],
-                        size=Size(1024),
+                        size=Size(frame_size),
                         rate=Rate('line', line_rate),
                         duration=Duration(Continuous(delay=start_delay, delay_unit='nanoseconds'))
                         )
@@ -334,7 +292,7 @@ def pfc_watch_dog_configs(testbed,
                             Header(choice=EthernetHeader()),
                             Header(choice=Ipv4Header(priority=dscp_pi)),
                         ],
-                        size=Size(1024),
+                        size=Size(frame_size),
                         rate=Rate('line', line_rate),
                         duration=Duration(Continuous(delay=start_delay, delay_unit='nanoseconds'))
                         )
@@ -350,7 +308,7 @@ def pfc_watch_dog_configs(testbed,
                             Header(choice=EthernetHeader()),
                             Header(choice=Ipv4Header(priority=dscp_pi)),
                         ],
-                        size=Size(1024),
+                        size=Size(frame_size),
                         rate=Rate('line', line_rate),
                         duration=Duration(Continuous(delay=start_delay, delay_unit='nanoseconds'))
                         )
@@ -360,14 +318,14 @@ def pfc_watch_dog_configs(testbed,
         ######################################################################
         # Traffic configuration Traffic 3->2
         #######################################################################
-
+        
         flow_3to2 = Flow(name="Traffic 3->2",
                         tx_rx=TxRx(DeviceTxRx(tx_device_names=[device3.name],rx_device_names=[device2.name])),
                         packet=[
                             Header(choice=EthernetHeader()),
                             Header(choice=Ipv4Header(priority=dscp_pi)),
                         ],
-                        size=Size(1024),
+                        size=Size(frame_size),
                         rate=Rate('line', line_rate),
                         duration=Duration(Continuous(delay=start_delay, delay_unit='nanoseconds'))
                         )
@@ -377,6 +335,7 @@ def pfc_watch_dog_configs(testbed,
         #######################################################################
         # Traffic configuration Pause
         #######################################################################
+
         if (pi == 3):
             pause = Header(PfcPause(
                 dst=FieldPattern(choice='01:80:C2:00:00:01'),
@@ -405,16 +364,87 @@ def pfc_watch_dog_configs(testbed,
                 pause_class_6=FieldPattern(choice='0'),
                 pause_class_7=FieldPattern(choice='0'),
             ))
+        else:
+            pytest_assert(False,
+                         "This testcase supports only lossless priorities 3 & 4")
 
         pause_flow = Flow(name='Pause Storm',
-                          tx_rx=TxRx(PortTxRx(tx_port_name=port3.name,rx_port_names=[port3.name])),
-                          packet=[pause],
-                          size=Size(64),
-                          rate=Rate('line', value=pause_line_rate),
-                          duration=Duration(Continuous(delay= t_start_pause * (10**9), delay_unit='nanoseconds'))
+                            tx_rx=TxRx(PortTxRx(tx_port_name=port3.name,rx_port_names=[port3.name])),
+                            packet=[pause],
+                            size=Size(64),
+                            rate=Rate('line', value=pause_line_rate),
+                            duration=Duration(Continuous(delay= t_start_pause * (10**9), delay_unit='nanoseconds'))
         )
 
         config.flows.append(pause_flow)
 
-        configs.append(config)
-    return configs
+        return config
+    return _pfc_watch_dog_config
+
+@pytest.fixture
+def pfc_watch_dog_multi_host_config(conn_graph_facts,
+                                    duthost,
+                                    one_hundred_gbe,
+                                    start_delay,
+                                    pause_line_rate,
+                                    traffic_line_rate,
+                                    frame_size,
+                                    t_start_pause,
+                                    pfc_watch_dog_config,
+                                    serializer) :
+    
+    def _pfc_watch_dog_multi_host_config(start_delay,
+                                    pause_line_rate,
+                                    traffic_line_rate,
+                                    frame_size,
+                                    t_start_pause,
+                                    pi):
+
+        line_rate = traffic_line_rate
+
+        config = pfc_watch_dog_config(start_delay,
+                                        pause_line_rate,
+                                        traffic_line_rate,
+                                        frame_size,
+                                        t_start_pause,
+                                        pi)
+
+        ######################################################################
+        # Traffic configuration Traffic 1->3
+        #######################################################################
+
+        dscp_pi = Priority(Dscp(phb=FieldPattern(choice=[str(pi)])))
+
+        flow_1to3 = Flow(name="Traffic 1->3",
+                         tx_rx=TxRx(DeviceTxRx(tx_device_names=[config.ports[0].devices[0].name],
+                                               rx_device_names=[config.ports[2].devices[0].name])),
+                         packet=[
+                             Header(choice=EthernetHeader()),
+                             Header(choice=Ipv4Header(priority=dscp_pi)),
+                         ],
+                         size=Size(frame_size),
+                         rate=Rate('line', line_rate),
+                         duration=Duration(Continuous(delay=start_delay, delay_unit='nanoseconds'))
+                         )
+
+        config.flows.append(flow_1to3)
+
+        ######################################################################
+        # Traffic configuration Traffic 3->1
+        #######################################################################
+
+        flow_3to1 = Flow(name="Traffic 3->1",
+                         tx_rx=TxRx(DeviceTxRx(tx_device_names=[config.ports[2].devices[0].name],
+                                               rx_device_names=[config.ports[0].devices[0].name])),
+                         packet=[
+                             Header(choice=EthernetHeader()),
+                             Header(choice=Ipv4Header(priority=dscp_pi)),
+                         ],
+                         size=Size(frame_size),
+                         rate=Rate('line', line_rate),
+                         duration=Duration(Continuous(delay=start_delay, delay_unit='nanoseconds'))
+                         )
+
+        config.flows.append(flow_3to1)
+        return config
+    return _pfc_watch_dog_multi_host_config            
